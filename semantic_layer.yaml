@@ -1,0 +1,85 @@
+glossary:
+  chiffre_affaires:
+    expression: SUM(factures.montant_ttc)
+    synonyms: [CA TTC, ventes TTC, رقم المعاملات]
+    description: "Chiffre d’affaires TTC en dirhams marocains, hors factures annulées."
+  ca_ht:
+    expression: SUM(factures.montant_ht)
+    synonyms: [CA HT, ventes hors taxes]
+    description: "Chiffre d’affaires HT en dirhams marocains, hors factures annulées."
+  filiale:
+    table: filiales
+    synonyms: [succursale, agence, branche, فرع, وكالة]
+  trimestre:
+    expression: DATE_TRUNC('quarter', date_facture)
+    synonyms: [quarter, ربع السنة]
+
+sensitive_columns: [employes.salaire, employes.email, clients.if_fiscal]
+allowed_tables: [filiales, clients, produits, stocks, factures, lignes_facture, employes_public]
+
+# Catalogue des colonnes accessibles au rôle de l'application.
+schema:
+  filiales: {id: INTEGER, nom: TEXT, ville: TEXT, region: TEXT, date_creation: DATE, actif: BOOLEAN}
+  clients: {id: INTEGER, raison_sociale: TEXT, ice: TEXT, ville: TEXT, secteur: TEXT, date_creation: DATE, actif: BOOLEAN}
+  produits: {id: INTEGER, reference: TEXT, designation: TEXT, categorie: TEXT, prix_unitaire_ht: NUMERIC, tva_taux: NUMERIC, actif: BOOLEAN}
+  stocks: {id: INTEGER, produit_id: INTEGER, filiale_id: INTEGER, quantite: INTEGER, seuil_alerte: INTEGER, date_maj: TIMESTAMPTZ}
+  factures: {id: INTEGER, numero_facture: TEXT, client_id: INTEGER, filiale_id: INTEGER, employe_id: INTEGER, date_facture: DATE, montant_ht: NUMERIC, tva: NUMERIC, montant_ttc: NUMERIC, statut: TEXT, date_paiement: DATE}
+  lignes_facture: {id: INTEGER, facture_id: INTEGER, produit_id: INTEGER, quantite: INTEGER, prix_unitaire: NUMERIC, montant_ligne: NUMERIC}
+  employes_public: {id: INTEGER, nom: TEXT, prenom: TEXT, poste: TEXT, filiale_id: INTEGER, date_embauche: DATE, actif: BOOLEAN}
+
+relationships:
+  stocks.produit_id: produits.id
+  stocks.filiale_id: filiales.id
+  factures.client_id: clients.id
+  factures.filiale_id: filiales.id
+  factures.employe_id: employes_public.id
+  lignes_facture.facture_id: factures.id
+  lignes_facture.produit_id: produits.id
+  employes_public.filiale_id: filiales.id
+
+rules:
+  - "Émettre une seule requête PostgreSQL SELECT. Les CTE SELECT non récursives sont autorisées."
+  - "Terminer chaque requête par LIMIT 1000 au niveau principal, y compris pour un classement. Appliquer les limites demandées dans une sous-requête ou une CTE."
+  - "Employer des alias de table, qualifier les colonnes et sélectionner explicitement les colonnes. COUNT(*) est autorisé."
+  - "Filtrer actif = TRUE pour les entités concernées, sauf demande explicite sur les entités inactives ou sur l'historique complet."
+  - "Pour le chiffre d’affaires, exclure statut = 'annulee' sauf demande contraire. Les statuts sont payee, en_attente et annulee."
+  - "Les lignes de facture sont HT. Pour un total par produit, agréger montant_ligne et ne pas répéter le total de l’en-tête pour chaque ligne."
+  - "Employer les dates de facture pour le chiffre d’affaires et date_paiement pour les encaissements."
+
+few_shot_examples:
+  - question: "Quel est le chiffre d’affaires TTC par filiale active ?"
+    sql: |
+      SELECT a.nom AS filiale, SUM(f.montant_ttc) AS ca_ttc
+      FROM factures AS f JOIN filiales AS a ON a.id = f.filiale_id
+      WHERE a.actif = TRUE AND f.statut <> 'annulee'
+      GROUP BY a.id, a.nom ORDER BY ca_ttc DESC LIMIT 1000;
+  - question: "Quel est le CA HT par trimestre depuis le début de l’année ?"
+    sql: |
+      SELECT DATE_TRUNC('quarter', f.date_facture) AS trimestre, SUM(f.montant_ht) AS ca_ht
+      FROM factures AS f
+      WHERE f.statut <> 'annulee' AND f.date_facture >= DATE_TRUNC('year', CURRENT_DATE)
+        AND f.date_facture <= CURRENT_DATE
+      GROUP BY trimestre ORDER BY trimestre LIMIT 1000;
+  - question: "Quels produits actifs sont au seuil d’alerte dans les agences actives ?"
+    sql: |
+      SELECT a.nom AS agence, p.designation, s.quantite, s.seuil_alerte
+      FROM stocks AS s JOIN produits AS p ON p.id = s.produit_id
+      JOIN filiales AS a ON a.id = s.filiale_id
+      WHERE s.quantite <= s.seuil_alerte AND p.actif = TRUE AND a.actif = TRUE
+      ORDER BY a.nom, p.designation LIMIT 1000;
+  - question: "Combien de clients actifs avons-nous par secteur ?"
+    sql: |
+      SELECT c.secteur, COUNT(*) AS nombre_clients
+      FROM clients AS c WHERE c.actif = TRUE
+      GROUP BY c.secteur ORDER BY nombre_clients DESC, c.secteur LIMIT 1000;
+  - question: "Combien d’employés actifs travaillent dans chaque filiale active, même si elle est vide ?"
+    sql: |
+      SELECT a.nom AS filiale, COUNT(e.id) AS nombre_employes
+      FROM filiales AS a LEFT JOIN employes_public AS e ON e.filiale_id = a.id AND e.actif = TRUE
+      WHERE a.actif = TRUE
+      GROUP BY a.id, a.nom ORDER BY nombre_employes DESC, a.nom LIMIT 1000;
+  - question: "كم عدد الفواتير المدفوعة في كل شهر؟"
+    sql: |
+      SELECT DATE_TRUNC('month', f.date_paiement) AS mois, COUNT(*) AS factures_payees
+      FROM factures AS f WHERE f.statut = 'payee'
+      GROUP BY mois ORDER BY mois LIMIT 1000;
